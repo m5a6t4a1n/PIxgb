@@ -358,20 +358,20 @@ if model is not None and st.button("开始预测", type="primary"):
     shap_df = pd.DataFrame([feature_values], columns=features_list)
     shap_df.columns = [feature_abbreviations[col] for col in shap_df.columns]
     
-    # 计算 SHAP 值
+    # 计算 SHAP 值（无提示版本）
     with st.spinner('正在生成模型解释图...'):
         try:
-            # 方法1：尝试使用TreeExplainer
-            try:
-                explainer = shap.TreeExplainer(model)
-                st.success("使用TreeExplainer成功")
-            except Exception as tree_error:
-                st.warning(f"TreeExplainer失败: {str(tree_error)}")
+            # 创建一个干净的数据集用于SHAP计算
+            def prepare_shap_data(model, features_df):
+                """准备SHAP计算所需的数据，不显示任何提示"""
+                # 确保数据格式正确
+                clean_df = features_df.copy()
                 
-                # 方法2：使用KernelExplainer作为备选
-                st.info("尝试使用KernelExplainer...")
+                # 创建预测函数
+                def model_predict(data):
+                    return model.predict_proba(data)[:, 1]
                 
-                # 创建背景数据
+                # 创建背景数据（使用特征范围的中间值）
                 background_data = []
                 for feature in features_list:
                     prop = feature_ranges[feature]
@@ -388,43 +388,55 @@ if model is not None and st.button("开始预测", type="primary"):
                 
                 background_df = pd.DataFrame([background_data], columns=features_list)
                 
-                # 定义预测函数
-                def model_predict(data):
-                    return model.predict_proba(data)[:, 1]
+                # 确保数据格式正确
+                for col in clean_df.columns:
+                    clean_df[col] = pd.to_numeric(clean_df[col], errors='coerce')
+                for col in background_df.columns:
+                    background_df[col] = pd.to_numeric(background_df[col], errors='coerce')
                 
+                return clean_df, background_df, model_predict
+            
+            # 准备数据
+            clean_df, background_df, model_predict = prepare_shap_data(model, features_df)
+            
+            # 静默计算SHAP值
+            try:
+                # 首先尝试使用KernelExplainer（避免TreeExplainer的提示）
                 explainer = shap.KernelExplainer(model_predict, background_df)
-                st.success("使用KernelExplainer成功")
-            
-            # 计算SHAP值
-            shap_values = explainer.shap_values(shap_df)
-            
-            # 处理SHAP值
-            if isinstance(shap_values, list):
-                # 如果是列表，取最后一个（通常是正类的SHAP值）
-                shap_values_array = shap_values[0] if len(shap_values) == 1 else shap_values[1]
-            else:
-                shap_values_array = shap_values
+                shap_values = explainer.shap_values(clean_df)
+            except Exception:
+                # 如果KernelExplainer失败，使用模型直接计算
+                shap_values = np.zeros((1, len(features_list)))
+                for i, col in enumerate(features_list):
+                    # 简单计算每个特征的影响
+                    original_pred = model_predict(clean_df)[0]
+                    temp_df = clean_df.copy()
+                    temp_df[col] = background_df[col].iloc[0]
+                    new_pred = model_predict(temp_df)[0]
+                    shap_values[0, i] = original_pred - new_pred
             
             # 获取基准值
-            if isinstance(explainer.expected_value, list):
-                if len(explainer.expected_value) > 1:
+            if hasattr(explainer, 'expected_value'):
+                if isinstance(explainer.expected_value, (list, np.ndarray)) and len(explainer.expected_value) > 1:
                     base_value = explainer.expected_value[1]
                 else:
-                    base_value = explainer.expected_value[0]
+                    base_value = explainer.expected_value[0] if isinstance(explainer.expected_value, (list, np.ndarray)) else explainer.expected_value
             else:
-                base_value = explainer.expected_value
+                base_value = 0.0
             
-            # 确保shap_values_array是二维数组
-            if len(shap_values_array.shape) == 1:
-                shap_values_array = shap_values_array.reshape(1, -1)
+            # 确保shap_values是正确格式
+            if isinstance(shap_values, list):
+                shap_values = np.array(shap_values).reshape(1, -1)
+            elif len(shap_values.shape) == 1:
+                shap_values = shap_values.reshape(1, -1)
             
             # 生成 SHAP 力图
             try:
                 plt.figure(figsize=(12, 4), dpi=100)
                 shap.force_plot(
                     base_value,
-                    shap_values_array[0],
-                    shap_df.iloc[0].values,
+                    shap_values[0],
+                    clean_df.iloc[0].values,
                     feature_names=shap_df.columns.tolist(),
                     matplotlib=True,
                     show=False
@@ -437,7 +449,7 @@ if model is not None and st.button("开始预测", type="primary"):
                 plt.close()
                 force_plot_success = True
             except Exception as e:
-                st.error(f"生成SHAP力图时出错: {str(e)}")
+                st.warning(f"生成SHAP力图时遇到问题，将显示特征重要性图代替")
                 force_plot_success = False
                 buf_force = None
             
@@ -448,9 +460,9 @@ if model is not None and st.button("开始预测", type="primary"):
                 
                 # 创建Explanation对象
                 exp = shap.Explanation(
-                    values=shap_values_array[0],
+                    values=shap_values[0],
                     base_values=base_value,
-                    data=shap_df.iloc[0].values,
+                    data=clean_df.iloc[0].values,
                     feature_names=shap_df.columns.tolist()
                 )
                 
@@ -463,7 +475,6 @@ if model is not None and st.button("开始预测", type="primary"):
                 plt.close()
                 waterfall_plot_success = True
             except Exception as e:
-                st.warning(f"瀑布图生成异常: {str(e)}")
                 waterfall_plot_success = False
                 buf_waterfall = None
             
@@ -475,24 +486,24 @@ if model is not None and st.button("开始预测", type="primary"):
             if force_plot_success and buf_force is not None:
                 st.markdown("#### SHAP Force Plot")
                 st.image(buf_force, use_column_width=True)
-                st.caption("The force plot shows how each feature pushes the model output from the base value to the final prediction")
+                st.caption("力图显示了每个特征如何将预测值从基准值推向最终预测值")
                 st.markdown("<br>", unsafe_allow_html=True)
             
             if waterfall_plot_success and buf_waterfall is not None:
                 st.markdown("#### SHAP Waterfall Plot")
                 st.image(buf_waterfall, use_column_width=True)
-                st.caption("The waterfall plot shows the cumulative contribution of each feature to the prediction")
-            elif not waterfall_plot_success:
+                st.caption("瀑布图显示了每个特征对预测结果的累积贡献")
+            else:
                 # 如果瀑布图失败，显示特征重要性条形图
                 st.markdown("#### 特征重要性")
                 
                 # 计算特征重要性
-                feature_importance = np.abs(shap_values_array[0])
+                feature_importance = np.abs(shap_values[0])
                 sorted_idx = np.argsort(feature_importance)[-8:]  # 取前8个
                 
                 # 创建条形图
                 fig, ax = plt.subplots(figsize=(10, 6))
-                colors = ['red' if shap_values_array[0][i] > 0 else 'blue' for i in sorted_idx]
+                colors = ['red' if shap_values[0][i] > 0 else 'blue' for i in sorted_idx]
                 ax.barh(range(len(sorted_idx)), feature_importance[sorted_idx], color=colors)
                 ax.set_yticks(range(len(sorted_idx)))
                 ax.set_yticklabels([shap_df.columns[i] for i in sorted_idx])
@@ -515,7 +526,7 @@ if model is not None and st.button("开始预测", type="primary"):
             # 计算每个特征的SHAP值贡献
             feature_shap = {}
             for i, feature in enumerate(shap_df.columns):
-                feature_shap[feature] = shap_values_array[0][i]
+                feature_shap[feature] = shap_values[0][i]
             
             # 按绝对贡献值排序
             sorted_features = sorted(feature_shap.items(), key=lambda x: abs(x[1]), reverse=True)
@@ -561,7 +572,6 @@ if model is not None and st.button("开始预测", type="primary"):
                 
         except Exception as e:
             st.error(f"生成模型解释图时出错: {str(e)}")
-            st.text(traceback.format_exc())
             st.info("""
             **解决方案：**
             1. 模型文件可能有问题，请重新训练并保存模型
