@@ -5,6 +5,7 @@ import shap
 import matplotlib.pyplot as plt
 from io import BytesIO
 import traceback
+import json
 
 # 设置页面配置
 st.set_page_config(
@@ -19,18 +20,53 @@ AUTHOR_INFO = {
     "institution": "山东药品食品职业学院"
 }
 
-# 加载保存的XGBoost模型
+# 加载并修复XGBoost模型
 @st.cache_resource
-def load_model():
+def load_and_fix_model():
     try:
         import joblib
+        import xgboost as xgb
+        
+        # 尝试加载模型
         model = joblib.load('xgb.pkl')
+        
+        # 检查模型类型
+        st.write(f"模型类型: {type(model)}")
+        
+        # 如果是XGBoost模型，尝试修复base_score
+        if hasattr(model, 'save_config'):
+            try:
+                # 获取模型配置
+                config = model.save_config()
+                config_dict = json.loads(config)
+                
+                # 修复base_score
+                if 'learner' in config_dict and 'learner_model_param' in config_dict['learner']:
+                    learner_model_param = config_dict['learner']['learner_model_param']
+                    if 'base_score' in learner_model_param:
+                        base_score_str = learner_model_param['base_score']
+                        st.write(f"原始base_score: {base_score_str}")
+                        
+                        # 修复base_score格式
+                        if isinstance(base_score_str, str) and base_score_str.startswith('[') and base_score_str.endswith(']'):
+                            # 提取数字部分
+                            base_score_clean = base_score_str.strip('[]')
+                            base_score_float = float(base_score_clean)
+                            config_dict['learner']['learner_model_param']['base_score'] = str(base_score_float)
+                            st.write(f"修复后base_score: {base_score_float}")
+                            
+                            # 重新加载配置
+                            model.load_config(json.dumps(config_dict))
+                            st.success("模型base_score参数已修复")
+            except Exception as e:
+                st.warning(f"修复模型参数时出错，但将继续使用原始模型: {str(e)}")
+        
         return model
     except Exception as e:
         st.error(f"加载模型时出错: {str(e)}")
         return None
 
-model = load_model()
+model = load_and_fix_model()
 
 # 特征缩写映射
 feature_abbreviations = {
@@ -322,48 +358,65 @@ if model is not None and st.button("开始预测", type="primary"):
     shap_df = pd.DataFrame([feature_values], columns=features_list)
     shap_df.columns = [feature_abbreviations[col] for col in shap_df.columns]
     
-    # 确保所有SHAP数据都是数值类型
-    for col in shap_df.columns:
-        # 尝试将每个值转换为浮点数
-        shap_df[col] = shap_df[col].apply(lambda x: float(str(x).strip('[]')) if isinstance(x, str) and '[' in str(x) and ']' in str(x) else float(x))
-    
     # 计算 SHAP 值
     with st.spinner('正在生成模型解释图...'):
         try:
-            # 对于XGBoost模型，使用TreeExplainer
-            explainer = shap.TreeExplainer(model)
+            # 方法1：尝试使用TreeExplainer
+            try:
+                explainer = shap.TreeExplainer(model)
+                st.success("使用TreeExplainer成功")
+            except Exception as tree_error:
+                st.warning(f"TreeExplainer失败: {str(tree_error)}")
+                
+                # 方法2：使用KernelExplainer作为备选
+                st.info("尝试使用KernelExplainer...")
+                
+                # 创建背景数据
+                background_data = []
+                for feature in features_list:
+                    prop = feature_ranges[feature]
+                    if prop["type"] == "numerical":
+                        # 使用中间值
+                        value = (prop["min"] + prop["max"]) / 2
+                        if prop.get("step", 1) == 1:
+                            value = int(value)
+                        else:
+                            value = round(value, 1)
+                    else:
+                        value = prop["default"]
+                    background_data.append(value)
+                
+                background_df = pd.DataFrame([background_data], columns=features_list)
+                
+                # 定义预测函数
+                def model_predict(data):
+                    return model.predict_proba(data)[:, 1]
+                
+                explainer = shap.KernelExplainer(model_predict, background_df)
+                st.success("使用KernelExplainer成功")
             
-            # 计算SHAP值 - 确保输入是数值类型
+            # 计算SHAP值
             shap_values = explainer.shap_values(shap_df)
             
-            # 调试信息
-            st.write(f"SHAP值类型: {type(shap_values)}")
-            
-            # XGBoost返回的SHAP值通常是列表，包含两个类别的SHAP值
-            if isinstance(shap_values, list) and len(shap_values) == 2:
-                # 对于二分类XGBoost，取正类（PI发生）的SHAP值
-                shap_values_array = shap_values[1]
-                st.write("使用列表中的第二个元素（正类）")
-            elif len(shap_values.shape) == 3:
-                # 如果是三维数组，取正类的SHAP值
-                shap_values_array = shap_values[:, :, 1]
-                st.write("使用三维数组的第二个维度")
+            # 处理SHAP值
+            if isinstance(shap_values, list):
+                # 如果是列表，取最后一个（通常是正类的SHAP值）
+                shap_values_array = shap_values[0] if len(shap_values) == 1 else shap_values[1]
             else:
                 shap_values_array = shap_values
-                st.write("使用原始SHAP值数组")
             
             # 获取基准值
             if isinstance(explainer.expected_value, list):
                 if len(explainer.expected_value) > 1:
-                    base_value = explainer.expected_value[1]  # 正类的基准值
+                    base_value = explainer.expected_value[1]
                 else:
                     base_value = explainer.expected_value[0]
             else:
                 base_value = explainer.expected_value
             
-            # 确保SHAP值和基准值都是数值
-            st.write(f"基准值: {base_value}, 类型: {type(base_value)}")
-            st.write(f"SHAP值形状: {shap_values_array.shape}")
+            # 确保shap_values_array是二维数组
+            if len(shap_values_array.shape) == 1:
+                shap_values_array = shap_values_array.reshape(1, -1)
             
             # 生成 SHAP 力图
             try:
@@ -382,8 +435,10 @@ if model is not None and st.button("开始预测", type="primary"):
                 buf_force = BytesIO()
                 plt.savefig(buf_force, format="png", bbox_inches="tight", dpi=100)
                 plt.close()
+                force_plot_success = True
             except Exception as e:
                 st.error(f"生成SHAP力图时出错: {str(e)}")
+                force_plot_success = False
                 buf_force = None
             
             # 生成 SHAP 瀑布图
@@ -406,52 +461,53 @@ if model is not None and st.button("开始预测", type="primary"):
                 buf_waterfall = BytesIO()
                 plt.savefig(buf_waterfall, format="png", bbox_inches="tight", dpi=100)
                 plt.close()
+                waterfall_plot_success = True
             except Exception as e:
-                st.warning(f"瀑布图生成异常，使用条形图替代: {str(e)}")
-                plt.figure(figsize=(12, 6), dpi=100)
-                plt.clf()  # 清除当前图形
-                
-                # 绘制条形图
-                # 计算特征重要性
-                feature_importance = np.abs(shap_values_array[0])
-                sorted_idx = np.argsort(feature_importance)[-max_display:]
-                
-                # 创建颜色：红色表示正影响，蓝色表示负影响
-                colors = ['red' if shap_values_array[0][i] > 0 else 'blue' for i in sorted_idx]
-                
-                plt.barh(range(len(sorted_idx)), shap_values_array[0][sorted_idx], color=colors)
-                plt.yticks(range(len(sorted_idx)), [shap_df.columns[i] for i in sorted_idx])
-                plt.xlabel("SHAP Value (Impact on PI Probability)")
-                plt.title(f"Feature Impact on PI Risk", fontsize=12, pad=20)
-                
-                # 添加图例
-                from matplotlib.patches import Patch
-                legend_elements = [Patch(facecolor='red', label='Increase PI Risk'),
-                                  Patch(facecolor='blue', label='Decrease PI Risk')]
-                plt.legend(handles=legend_elements, loc='lower right')
-                
-                plt.tight_layout()
-                buf_waterfall = BytesIO()
-                plt.savefig(buf_waterfall, format="png", bbox_inches="tight", dpi=100)
-                plt.close()
+                st.warning(f"瀑布图生成异常: {str(e)}")
+                waterfall_plot_success = False
+                buf_waterfall = None
             
             # 显示SHAP解释图
             st.subheader("模型解释")
             st.markdown("以下图表显示了各个特征变量对预测结果的贡献程度：")
             
-            if buf_force is not None:
-                # SHAP力图在上面
+            # 显示可用的图表
+            if force_plot_success and buf_force is not None:
                 st.markdown("#### SHAP Force Plot")
                 st.image(buf_force, use_column_width=True)
                 st.caption("The force plot shows how each feature pushes the model output from the base value to the final prediction")
-                
-                # 添加一个小分隔
                 st.markdown("<br>", unsafe_allow_html=True)
             
-            # SHAP瀑布图在下面
-            st.markdown("#### SHAP Waterfall Plot")
-            st.image(buf_waterfall, use_column_width=True)
-            st.caption("The waterfall plot shows the cumulative contribution of each feature to the prediction")
+            if waterfall_plot_success and buf_waterfall is not None:
+                st.markdown("#### SHAP Waterfall Plot")
+                st.image(buf_waterfall, use_column_width=True)
+                st.caption("The waterfall plot shows the cumulative contribution of each feature to the prediction")
+            elif not waterfall_plot_success:
+                # 如果瀑布图失败，显示特征重要性条形图
+                st.markdown("#### 特征重要性")
+                
+                # 计算特征重要性
+                feature_importance = np.abs(shap_values_array[0])
+                sorted_idx = np.argsort(feature_importance)[-8:]  # 取前8个
+                
+                # 创建条形图
+                fig, ax = plt.subplots(figsize=(10, 6))
+                colors = ['red' if shap_values_array[0][i] > 0 else 'blue' for i in sorted_idx]
+                ax.barh(range(len(sorted_idx)), feature_importance[sorted_idx], color=colors)
+                ax.set_yticks(range(len(sorted_idx)))
+                ax.set_yticklabels([shap_df.columns[i] for i in sorted_idx])
+                ax.set_xlabel("特征重要性 (绝对SHAP值)")
+                ax.set_title("Top 8 特征重要性", fontsize=12, pad=20)
+                
+                # 添加图例
+                from matplotlib.patches import Patch
+                legend_elements = [Patch(facecolor='red', label='增加PI风险'),
+                                  Patch(facecolor='blue', label='降低PI风险')]
+                ax.legend(handles=legend_elements, loc='lower right')
+                
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close()
             
             # 添加特征影响分析
             st.subheader("特征影响分析")
@@ -508,10 +564,9 @@ if model is not None and st.button("开始预测", type="primary"):
             st.text(traceback.format_exc())
             st.info("""
             **解决方案：**
-            1. 刷新页面并重试
-            2. 确保所有输入值在合理范围内
-            3. 检查模型文件是否正确
-            4. 如果问题持续，请联系开发人员
+            1. 模型文件可能有问题，请重新训练并保存模型
+            2. 刷新页面并重试
+            3. 如果问题持续，请联系开发人员
             """)
 
 # 侧边栏信息
