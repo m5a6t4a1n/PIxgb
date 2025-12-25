@@ -1,10 +1,10 @@
 import streamlit as st
-import joblib
 import numpy as np
 import pandas as pd
 import shap
 import matplotlib.pyplot as plt
 from io import BytesIO
+import traceback
 
 # 设置页面配置
 st.set_page_config(
@@ -23,10 +23,11 @@ AUTHOR_INFO = {
 @st.cache_resource
 def load_model():
     try:
+        import joblib
         model = joblib.load('xgb.pkl')
         return model
-    except FileNotFoundError:
-        st.error("模型文件 'xgb.pkl' 未找到。请确保模型文件已上传。")
+    except Exception as e:
+        st.error(f"加载模型时出错: {str(e)}")
         return None
 
 model = load_model()
@@ -172,7 +173,7 @@ for i, feature in enumerate(features_list):
                         format="%.1f",  # 显示一位小数
                         help=f"范围: {properties['min']} - {properties['max']}，每次增减: {step}"
                     )
-                    value = round(value, 1)  # 保留1位小数
+                    value = round(float(value), 1)  # 保留1位小数，确保是浮点数
                     
             elif properties["type"] == "categorical":
                 option_labels = properties.get("option_labels", {k: str(k) for k in properties["options"]})
@@ -182,7 +183,7 @@ for i, feature in enumerate(features_list):
                     format_func=lambda x: option_labels[x],
                     index=properties["options"].index(properties["default"])
                 )
-                value = selected_label
+                value = int(selected_label)  # 确保是整数
             feature_values.append(value)
     else:
         with col2:
@@ -214,7 +215,7 @@ for i, feature in enumerate(features_list):
                         format="%.1f",  # 显示一位小数
                         help=f"范围: {properties['min']} - {properties['max']}，每次增减: {step}"
                     )
-                    value = round(value, 1)  # 保留1位小数
+                    value = round(float(value), 1)  # 保留1位小数，确保是浮点数
                     
             elif properties["type"] == "categorical":
                 option_labels = properties.get("option_labels", {k: str(k) for k in properties["options"]})
@@ -224,7 +225,7 @@ for i, feature in enumerate(features_list):
                     format_func=lambda x: option_labels[x],
                     index=properties["options"].index(properties["default"])
                 )
-                value = selected_label
+                value = int(selected_label)  # 确保是整数
             feature_values.append(value)
 
 # 显示当前输入值预览
@@ -254,18 +255,38 @@ if model is not None and st.button("开始预测", type="primary"):
     with st.spinner('模型正在计算中，请稍候...'):
         # 创建DataFrame用于模型预测
         features_df = pd.DataFrame([feature_values], columns=features_list)
+        
+        # 确保所有列都是数值类型
+        for col in features_list:
+            features_df[col] = pd.to_numeric(features_df[col], errors='coerce')
+        
+        # 检查是否有NaN值
+        if features_df.isnull().any().any():
+            st.error("输入值包含无效数据，请检查输入")
+            st.stop()
 
         # 模型预测
-        predicted_class = model.predict(features_df)[0]
-        predicted_proba = model.predict_proba(features_df)[0]
-
-        # 提取概率 - 修复逻辑错误
-        # 总是显示PI发生的概率（正类，类别1的概率）
-        probability_positive = predicted_proba[1] * 100  # PI发生的概率
-        probability_negative = predicted_proba[0] * 100  # 不发生PI的概率
-        
-        # 显示的PI发生概率
-        probability = probability_positive
+        try:
+            # 确保特征顺序与模型训练时一致
+            if hasattr(model, 'feature_names_in_'):
+                # 如果模型有feature_names_in_属性，确保顺序一致
+                expected_features = model.feature_names_in_
+                features_df = features_df[expected_features]
+            
+            predicted_class = model.predict(features_df)[0]
+            predicted_proba = model.predict_proba(features_df)[0]
+            
+            # 提取概率
+            probability_positive = predicted_proba[1] * 100  # PI发生的概率
+            probability_negative = predicted_proba[0] * 100  # 不发生PI的概率
+            
+            # 显示的PI发生概率
+            probability = probability_positive
+            
+        except Exception as e:
+            st.error(f"模型预测时出错: {str(e)}")
+            st.info("请检查输入数据格式是否正确")
+            st.stop()
 
     # 显示预测结果
     st.subheader("预测结果")
@@ -301,66 +322,93 @@ if model is not None and st.button("开始预测", type="primary"):
     shap_df = pd.DataFrame([feature_values], columns=features_list)
     shap_df.columns = [feature_abbreviations[col] for col in shap_df.columns]
     
+    # 确保所有SHAP数据都是数值类型
+    for col in shap_df.columns:
+        # 尝试将每个值转换为浮点数
+        shap_df[col] = shap_df[col].apply(lambda x: float(str(x).strip('[]')) if isinstance(x, str) and '[' in str(x) and ']' in str(x) else float(x))
+    
     # 计算 SHAP 值
     with st.spinner('正在生成模型解释图...'):
         try:
             # 对于XGBoost模型，使用TreeExplainer
             explainer = shap.TreeExplainer(model)
             
-            # 计算SHAP值
+            # 计算SHAP值 - 确保输入是数值类型
             shap_values = explainer.shap_values(shap_df)
+            
+            # 调试信息
+            st.write(f"SHAP值类型: {type(shap_values)}")
             
             # XGBoost返回的SHAP值通常是列表，包含两个类别的SHAP值
             if isinstance(shap_values, list) and len(shap_values) == 2:
                 # 对于二分类XGBoost，取正类（PI发生）的SHAP值
                 shap_values_array = shap_values[1]
+                st.write("使用列表中的第二个元素（正类）")
             elif len(shap_values.shape) == 3:
                 # 如果是三维数组，取正类的SHAP值
                 shap_values_array = shap_values[:, :, 1]
+                st.write("使用三维数组的第二个维度")
             else:
                 shap_values_array = shap_values
+                st.write("使用原始SHAP值数组")
             
             # 获取基准值
             if isinstance(explainer.expected_value, list):
-                base_value = explainer.expected_value[1]  # 正类的基准值
+                if len(explainer.expected_value) > 1:
+                    base_value = explainer.expected_value[1]  # 正类的基准值
+                else:
+                    base_value = explainer.expected_value[0]
             else:
                 base_value = explainer.expected_value
             
+            # 确保SHAP值和基准值都是数值
+            st.write(f"基准值: {base_value}, 类型: {type(base_value)}")
+            st.write(f"SHAP值形状: {shap_values_array.shape}")
+            
             # 生成 SHAP 力图
-            plt.figure(figsize=(12, 4), dpi=100)
-            shap.force_plot(
-                base_value,
-                shap_values_array[0],
-                shap_df.iloc[0].values,
-                feature_names=shap_df.columns.tolist(),
-                matplotlib=True,
-                show=False
-            )
-            
-            plt.tight_layout()
-            
-            buf_force = BytesIO()
-            plt.savefig(buf_force, format="png", bbox_inches="tight", dpi=100)
-            plt.close()
-            
-            # 生成 SHAP 瀑布图 - 使用更稳定的方法
-            plt.figure(figsize=(12, 6), dpi=100)  # 增加宽度，使瀑布图更清晰
-            max_display = min(8, len(shap_df.columns))
-            
-            # 创建Explanation对象
-            exp = shap.Explanation(
-                values=shap_values_array[0],
-                base_values=base_value,
-                data=shap_df.iloc[0].values,
-                feature_names=shap_df.columns.tolist()
-            )
-            
-            # 尝试绘制瀑布图，如果失败则使用条形图
             try:
+                plt.figure(figsize=(12, 4), dpi=100)
+                shap.force_plot(
+                    base_value,
+                    shap_values_array[0],
+                    shap_df.iloc[0].values,
+                    feature_names=shap_df.columns.tolist(),
+                    matplotlib=True,
+                    show=False
+                )
+                
+                plt.tight_layout()
+                
+                buf_force = BytesIO()
+                plt.savefig(buf_force, format="png", bbox_inches="tight", dpi=100)
+                plt.close()
+            except Exception as e:
+                st.error(f"生成SHAP力图时出错: {str(e)}")
+                buf_force = None
+            
+            # 生成 SHAP 瀑布图
+            try:
+                plt.figure(figsize=(12, 6), dpi=100)
+                max_display = min(8, len(shap_df.columns))
+                
+                # 创建Explanation对象
+                exp = shap.Explanation(
+                    values=shap_values_array[0],
+                    base_values=base_value,
+                    data=shap_df.iloc[0].values,
+                    feature_names=shap_df.columns.tolist()
+                )
+                
                 # 绘制瀑布图
                 shap.plots.waterfall(exp, max_display=max_display, show=False)
+                
+                plt.tight_layout()
+                buf_waterfall = BytesIO()
+                plt.savefig(buf_waterfall, format="png", bbox_inches="tight", dpi=100)
+                plt.close()
             except Exception as e:
                 st.warning(f"瀑布图生成异常，使用条形图替代: {str(e)}")
+                plt.figure(figsize=(12, 6), dpi=100)
                 plt.clf()  # 清除当前图形
                 
                 # 绘制条形图
@@ -374,33 +422,31 @@ if model is not None and st.button("开始预测", type="primary"):
                 plt.barh(range(len(sorted_idx)), shap_values_array[0][sorted_idx], color=colors)
                 plt.yticks(range(len(sorted_idx)), [shap_df.columns[i] for i in sorted_idx])
                 plt.xlabel("SHAP Value (Impact on PI Probability)")
+                plt.title(f"Feature Impact on PI Risk", fontsize=12, pad=20)
                 
                 # 添加图例
                 from matplotlib.patches import Patch
                 legend_elements = [Patch(facecolor='red', label='Increase PI Risk'),
                                   Patch(facecolor='blue', label='Decrease PI Risk')]
                 plt.legend(handles=legend_elements, loc='lower right')
+                
+                plt.tight_layout()
+                buf_waterfall = BytesIO()
+                plt.savefig(buf_waterfall, format="png", bbox_inches="tight", dpi=100)
+                plt.close()
             
-            plt.tight_layout()
-            buf_waterfall = BytesIO()
-            plt.savefig(buf_waterfall, format="png", bbox_inches="tight", dpi=100)
-            plt.close()
-            
-            # 重置缓冲区位置
-            buf_force.seek(0)
-            buf_waterfall.seek(0)
-            
-            # 显示SHAP解释图 - 改为上下排列
+            # 显示SHAP解释图
             st.subheader("模型解释")
             st.markdown("以下图表显示了各个特征变量对预测结果的贡献程度：")
             
-            # SHAP力图在上面
-            st.markdown("#### SHAP Force Plot")
-            st.image(buf_force, use_column_width=True)
-            st.caption("The force plot shows how each feature pushes the model output from the base value to the final prediction")
-            
-            # 添加一个小分隔
-            st.markdown("<br>", unsafe_allow_html=True)
+            if buf_force is not None:
+                # SHAP力图在上面
+                st.markdown("#### SHAP Force Plot")
+                st.image(buf_force, use_column_width=True)
+                st.caption("The force plot shows how each feature pushes the model output from the base value to the final prediction")
+                
+                # 添加一个小分隔
+                st.markdown("<br>", unsafe_allow_html=True)
             
             # SHAP瀑布图在下面
             st.markdown("#### SHAP Waterfall Plot")
@@ -459,11 +505,13 @@ if model is not None and st.button("开始预测", type="primary"):
                 
         except Exception as e:
             st.error(f"生成模型解释图时出错: {str(e)}")
+            st.text(traceback.format_exc())
             st.info("""
             **解决方案：**
             1. 刷新页面并重试
             2. 确保所有输入值在合理范围内
-            3. 如果问题持续，请联系开发人员
+            3. 检查模型文件是否正确
+            4. 如果问题持续，请联系开发人员
             """)
 
 # 侧边栏信息
