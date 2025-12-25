@@ -5,3 +5,4 @@ pandas==2.2.2
 matplotlib==3.8.0
 scikit-learn==1.5.1
 shap==0.45.1
+xgboost
