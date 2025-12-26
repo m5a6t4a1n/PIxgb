@@ -86,7 +86,7 @@ feature_ranges = {
         "type": "numerical", 
         "min": 0, 
         "max": 40, 
-        "default": 10, 
+        "default": 12, 
         "step": 1,  # 整数步长
         "label": "FCTI总分"
     },
@@ -94,7 +94,7 @@ feature_ranges = {
         "type": "numerical", 
         "min": 70, 
         "max": 98, 
-        "default": 87, 
+        "default": 79, 
         "step": 1,  # 整数步长
         "label": "年龄（岁）"
     },
@@ -102,14 +102,14 @@ feature_ranges = {
         "type": "numerical", 
         "min": 20.0, 
         "max": 60.0, 
-        "default": 24.3, 
+        "default": 34.2, 
         "step": 0.1,  # 小数步长
         "label": "血清白蛋白 (g/L)"
     },
     "Fra": {
         "type": "categorical", 
         "options": [0,1,2,3,4,5,6,7,8,9,10,11,12,13], 
-        "default": 9, 
+        "default": 5, 
         "label": "骨折类型", 
         "option_labels": {
             0: "颈椎骨折", 1: "胸椎骨折", 2: "腰椎骨折", 
@@ -129,7 +129,7 @@ feature_ranges = {
         "type": "numerical", 
         "min": 0, 
         "max": 8, 
-        "default": 1, 
+        "default": 5, 
         "step": 1,  # 整数步长
         "label": "合并症数量"
     },
@@ -144,7 +144,7 @@ feature_ranges = {
     "Mlu": {
         "type": "categorical", 
         "options": [0, 1], 
-        "default": 0, 
+        "default": 1, 
         "label": "多发性骨折", 
         "option_labels": {0: "否", 1: "是"}
     },
