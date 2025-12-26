@@ -588,7 +588,7 @@ with st.sidebar:
     - **作者**: {AUTHOR_INFO["author"]}
     
     ### 模型信息
-    - **算法**: Logistic Regression (逻辑回归)
+    - **算法**: XGBoost (极端梯度提升)
     - **训练数据**: 临床数据
     - **预测目标**: 压力性损伤(PI)风险
     - **特征数量**: 8个指标
